@@ -1,0 +1,23 @@
+{
+  "name": "openclaw-source-code-analysis",
+  "version": "1.0.0",
+  "description": "OpenClaw 源码解析 - 从 Gateway 到 Agent Runtime",
+  "type": "module",
+  "scripts": {
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  "keywords": [
+    "openclaw",
+    "ai-agent",
+    "gateway",
+    "llm",
+    "typescript",
+    "source-code"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "vitepress": "^1.0.0"
+  }
+}
