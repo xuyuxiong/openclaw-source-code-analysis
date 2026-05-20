@@ -1,288 +1,230 @@
 # Tool 工具系统
 
-深入 OpenClaw 的 Tool 系统，理解工具注册、调度、沙箱执行、审批机制的完整流程。
+深入 OpenClaw 的工具系统，理解工具注册、安全策略、审批流程的完整实现。
 
-## 🏗️ Tool 系统架构
+## 🏗️ 工具架构
 
 ```
-LLM 返回 Tool Call
+LLM 请求工具调用 (function_call)
     ↓
-Tool Dispatcher（路由）
-    ↓
-┌─────────────────────────────────────────┐
-│            权限检查 (Policy)             │
-│  ┌─────────┐ ┌─────────┐ ┌──────────┐  │
-│  │ allow   │ │ allow-  │ │  deny    │  │
-│  │ (放行)  │ │ list    │ │  (拒绝)  │  │
-│  │         │ │ (审批)  │ │          │  │
-│  └────┬────┘ └────┬────┘ └────┬─────┘  │
-│       ↓           ↓           ↓         │
-│     执行    请求用户批准    返回错误      │
-└─────────────────────────────────────────┘
-    ↓
-Sandbox（沙箱执行）
-    ↓
-返回结果给 LLM
+Tool Dispatcher (openclaw-tools.ts)
+    ↓ 安全策略检查
+    ├── Policy: deny → 拒绝
+    ├── Policy: allowlist → 检查白名单
+    └── Policy: full → 允许执行
+    ↓ 审批检查（如需）
+    ├── ExecApprovalManager → 等待用户审批
+    └── 自动通过
+    ↓ 执行工具
+Tool Implementation
+    ↓ 结果
+Agent Loop (继续或返回)
 ```
 
-## 📦 内置工具清单
+## 📦 全部内置工具
 
-| 工具 | 权限 | 说明 |
+源码位置：`src/agents/tools/`
+
+| 工具 | 文件 | 说明 |
 |------|------|------|
-| `exec` | allowlist | 执行 shell 命令 |
-| `read` | allow | 读取文件 |
-| `write` | allow | 写入文件 |
-| `edit` | allow | 编辑文件 |
-| `web_search` | allow | 搜索网页 |
-| `web_fetch` | allow | 抓取网页 |
-| `image` | allow | 分析图片 |
-| `pdf` | allow | 分析 PDF |
-| `cron` | allow | 定时任务管理 |
-| `message` | allow | 发送消息 |
-| `tts` | allow | 文本转语音 |
-| `nodes` | allow | 设备管理 |
-| `gateway` | allow | Gateway 配置 |
-| `sessions` | allow | 会话管理 |
+| **exec** | `bash-tools.ts` | Shell 命令执行（支持 gateway/sandbox/node 三种 host） |
+| **read** | 内置 | 读取文件内容 |
+| **write** | 内置 | 写入文件 |
+| **edit** | 内置 | 精确文本替换 |
+| **image** | `image-tool.ts` | 图片分析 |
+| **image-generate** | `image-generate-tool.ts` | 图片生成 |
+| **pdf** | `pdf-tool.ts` | PDF 分析 |
+| **web_search** | `web-search.ts` | 网页搜索 |
+| **web_fetch** | `web-fetch.ts` | URL 抓取 |
+| **cron** | `cron-tool.ts` | 定时任务管理 |
+| **message** | `message-tool.ts` | 消息发送 |
+| **nodes** | `nodes-tool.ts` | Node 设备控制 |
+| **canvas** | `canvas-tool.ts` | Canvas 渲染 |
+| **gateway** | `gateway-tool.ts` | Gateway 配置管理 |
+| **tts** | `tts-tool.ts` | 文本转语音 |
+| **sessions_spawn** | `sessions-spawn-tool.ts` | 子代理生成 |
+| **sessions_send** | `sessions-send-tool.ts` | 跨会话消息 |
+| **sessions_list** | `sessions-list-tool.ts` | 会话列表 |
+| **sessions_history** | `sessions-history-tool.ts` | 会话历史 |
+| **sessions_yield** | `sessions-yield-tool.ts` | 让出当前轮 |
+| **session_status** | `session-status-tool.ts` | 会话状态 |
+| **subagents** | `subagents-tool.ts` | 子代理管理 |
+| **agents_list** | `agents-list-tool.ts` | Agent 列表 |
 
-## 🔧 工具注册
+## 🔐 安全策略体系
 
-```typescript
-// 工具定义接口
-interface ToolDefinition {
-  name: string                    // 工具名，LLM 看到的名称
-  description: string             // 描述，帮助 LLM 决定何时调用
-  parameters: JSONSchema          // 参数 JSON Schema
-  execute: (params, context) => Promise<ToolResult>
-}
-
-// 注册示例：read 工具
-const readTool: ToolDefinition = {
-  name: 'read',
-  description: 'Read file contents. Supports text files and images.',
-  parameters: {
-    type: 'object',
-    properties: {
-      file: { type: 'string', description: 'File path' },
-      offset: { type: 'number', description: 'Start line' },
-      limit: { type: 'number', description: 'Max lines' }
-    },
-    required: ['file']
-  },
-  execute: async (params, context) => {
-    const { file, offset, limit } = params
-    const content = await context.fs.readFile(file, { offset, limit })
-    return { type: 'text', content }
-  }
-}
-```
-
-## 🔄 Tool Call 流程
-
-### 1. LLM 返回 Tool Call
-
-```json
-{
-  "type": "function",
-  "function": {
-    "name": "exec",
-    "arguments": "{\"command\": \"ls -la\"}"
-  }
-}
-```
-
-### 2. Tool Dispatcher 路由
+### 三级策略
 
 ```typescript
-class ToolDispatcher {
-  private tools: Map<string, ToolDefinition> = new Map()
+// 源码: src/config/types.tools.ts
+type ExecToolConfig = {
+  host?: "sandbox" | "gateway" | "node";   // 执行位置
+  security?: "deny" | "allowlist" | "full"; // 安全模式
+  ask?: "off" | "on-miss" | "always";      // 审批模式
+  node?: string;                            // 默认 Node ID
+  safeBins?: string[];                      // 安全二进制（stdin-only）
+  strictInlineEval?: boolean;               // 严格内联求值审批
+  timeoutSec?: number;                      // 超时时间
+  backgroundMs?: number;                    // 后台化时间
+  applyPatch?: {
+    enabled?: boolean;                      // apply_patch 子工具
+    workspaceOnly?: boolean;               // 限制工作区
+    allowModels?: string[];                // 允许的模型
+  };
+};
+```
 
-  async dispatch(toolCall: ToolCall, context: ToolContext): Promise<ToolResult> {
-    const tool = this.tools.get(toolCall.name)
+| 安全模式 | 行为 |
+|---------|------|
+| `deny` | 拒绝所有执行请求 |
+| `allowlist` | 白名单内的命令直接执行，其他需审批 |
+| `full` | 所有命令直接执行（⚠️ 危险） |
 
-    if (!tool) {
-      return { type: 'error', content: `Unknown tool: ${toolCall.name}` }
-    }
+| 审批模式 | 行为 |
+|---------|------|
+| `off` | 不请求审批 |
+| `on-miss` | 不在白名单时请求审批 |
+| `always` | 所有命令都需审批 |
 
-    // 权限检查
-    const policy = this.checkPolicy(tool.name, toolCall.arguments, context)
-    if (policy === 'deny') {
-      return { type: 'error', content: `Tool ${tool.name} is denied` }
-    }
-    if (policy === 'approval') {
-      const approved = await this.requestApproval(tool.name, toolCall.arguments)
-      if (!approved) {
-        return { type: 'error', content: `Tool ${tool.name} was not approved` }
-      }
-    }
+### 工具白名单（Profile）
 
-    // 参数校验
-    const validated = this.validateParams(tool, toolCall.arguments)
+```typescript
+type ToolProfileId = "minimal" | "coding" | "messaging" | "full";
 
-    // 沙箱执行
-    return await this.sandbox.execute(tool, validated, context)
-  }
+type ToolsConfig = {
+  profile?: ToolProfileId;         // 基础 Profile
+  allow?: string[];                // 额外允许
+  alsoAllow?: string[];            // 追加允许（不替换）
+  deny?: string[];                 // 拒绝
+  byProvider?: Record<string, {    // 按 Provider 覆盖
+    profile?: ToolProfileId;
+    allow?: string[];
+    alsoAllow?: string[];
+    deny?: string[];
+  }>;
+};
+```
+
+### 循环检测
+
+```typescript
+// 源码: src/config/types.tools.ts
+type ToolLoopDetectionConfig = {
+  enabled?: boolean;              // 启用循环检测（默认 false）
+  historySize?: number;           // 历史大小（默认 30）
+  warningThreshold?: number;      // 告警阈值（默认 10）
+  criticalThreshold?: number;     // 临界阈值（默认 20）
+  globalCircuitBreakerThreshold?: number;  // 全局熔断（默认 30）
+  detectors?: {
+    genericRepeat?: boolean;      // 重复调用检测
+    knownPollNoProgress?: boolean; // 轮询无进展检测
+    pingPong?: boolean;           // 乒乓交替检测
+  };
+};
+```
+
+### Sub-agent 工具策略
+
+```typescript
+type ToolsConfig = {
+  subagents?: {
+    model?: string | { primary?: string; fallbacks?: string[] };
+    tools?: {
+      allow?: string[];
+      alsoAllow?: string[];
+      deny?: string[];       // deny 赢：即使上层 allow，子代理 deny 也生效
+    };
+  };
+};
+```
+
+### 文件系统限制
+
+```typescript
+type FsToolsConfig = {
+  workspaceOnly?: boolean;  // 限制 read/write/edit 到工作区
+};
+
+type ToolsConfig = {
+  fs?: FsToolsConfig;
+};
+```
+
+## 🔧 Exec 审批流程
+
+```typescript
+// 源码: src/gateway/exec-approval-manager.ts
+class ExecApprovalManager {
+  // 创建审批请求
+  create(request, timeoutMs, id?): ExecApprovalRecord;
+
+  // 注册并等待审批
+  register(record, timeoutMs): Promise<ExecApprovalDecision | null>;
+
+  // 用户审批
+  resolve(id, decision): void;
+
+  // 超时 → 自动拒绝 (null)
 }
+
+type ExecApprovalRecord = {
+  id: string;
+  request: ExecApprovalRequestPayload;
+  createdAtMs: number;
+  expiresAtMs: number;
+  requestedByConnId?: string;
+  requestedByDeviceId?: string;
+  decision?: ExecApprovalDecision;
+  resolvedBy?: string;
+};
 ```
 
-### 3. 沙箱执行
-
+流程：
 ```
-Tool Dispatcher
+LLM 请求执行命令
     ↓
-Sandbox Manager
-    ├── exec 工具 → 子进程（受限制）
-    ├── read/write 工具 → 文件系统（受限制路径）
-    ├── web 工具 → 网络请求（受限制域名）
-    └── 其他工具 → Gateway 主进程
-```
-
-### 4. 返回结果
-
-```typescript
-interface ToolResult {
-  type: 'text' | 'image' | 'error'
-  content: string | Buffer
-  metadata?: {
-    exitCode?: number      // exec 工具的退出码
-    mimeType?: string      // 内容类型
-    truncated?: boolean    // 是否截断
-  }
-}
-```
-
-## 🛡️ 权限策略
-
-```yaml
-# config.yaml
-tools:
-  exec:
-    enabled: true
-    security: allowlist       # full | allowlist | deny
-    # full: 所有命令直接执行
-    # allowlist: 白名单命令直接执行，其他需审批
-    # deny: 禁止执行
-
-  read:
-    enabled: true
-    security: full
-    allowedPaths:
-      - ~/.homiclaw/workspace
-      - ~/Desktop
-      - ~/Documents
-
-  write:
-    enabled: true
-    security: full
-    allowedPaths:
-      - ~/.homiclaw/workspace
-
-  web_search:
-    enabled: true
-    security: full
-
-  web_fetch:
-    enabled: true
-    security: full
-    blockedDomains:
-      - internal.company.com  # 阻止内网
-```
-
-### 审批流程
-
-```
-exec: "rm -rf /"
+security = allowlist, 命令不在白名单
     ↓
-Policy: allowlist → 不在白名单 → 需要审批
+ask = on-miss → 需要审批
     ↓
-Channel 发送审批消息给用户：
-  "⚠️ exec 工具请求执行: rm -rf /
-   /approve 允许 / /deny 拒绝"
+创建 ExecApprovalRecord
     ↓
-用户回复 /approve
+发送审批请求到用户 Channel
+  "⚠️ exec 请求执行: rm -rf /tmp/test
+   /approve 允许 | /deny 拒绝"
     ↓
-执行命令 → 返回结果
+用户回复 /approve → resolve(id, "allow")
+用户回复 /deny → resolve(id, "deny")
+超时 → resolve(id, null) → 自动拒绝
+    ↓
+根据决策执行或拒绝
 ```
 
-## 💡 工具开发最佳实践
+## 💡 设计要点
 
-### 1. 描述要精确
-
-```typescript
-// ❌ 差的描述
-description: 'Read a file'
-
-// ✅ 好的描述
-description: 'Read file contents. Supports text files (jpg, png, gif, webp) and images. Output truncated to 2000 lines.'
-```
-
-### 2. 参数 Schema 要完整
-
-```typescript
-// ✅ 完整的参数定义
-parameters: {
-  type: 'object',
-  properties: {
-    command: {
-      type: 'string',
-      description: 'Shell command to execute. Use pty=true for TTY-required commands.'
-    },
-    timeout: {
-      type: 'number',
-      description: 'Timeout in seconds. Default: 15.',
-      default: 15
-    },
-    workdir: {
-      type: 'string',
-      description: 'Working directory. Defaults to cwd.'
-    }
-  },
-  required: ['command']
-}
-```
-
-### 3. 错误处理要友好
-
-```typescript
-execute: async (params, context) => {
-  try {
-    const result = await doSomething(params)
-    return { type: 'text', content: result }
-  } catch (err) {
-    // ❌ 不要暴露内部错误
-    // return { type: 'error', content: err.stack }
-
-    // ✅ 友好的错误消息
-    return { type: 'error', content: `Failed to read file: ${err.message}` }
-  }
-}
-```
-
-## 🐛 常见问题
-
-### Q: 工具执行超时怎么办？
+### 1. 三层 Host 路由
 
 ```
-exec 工具有 timeout 参数，默认 15 秒。
-对于长时间运行的命令，设置 timeout=300。
-超时后进程被 SIGTERM 终止。
+exec 命令可路由到三种执行环境：
+├── host=gateway → 本机直接执行（默认）
+├── host=sandbox → Docker 容器内执行（隔离）
+└── host=node → 远程设备执行（Node App）
 ```
 
-### Q: 如何禁用特定工具？
-
-```yaml
-tools:
-  exec:
-    enabled: false    # 禁用 exec 工具
-  web_search:
-    enabled: false    # 禁用搜索
-```
-
-### Q: 工具调用结果可以很长，会被截断吗？
+### 2. Safe Bins（安全二进制）
 
 ```
-会。Tool Result 有最大长度限制（默认 10000 字符）。
-超出部分会被截断，metadata.truncated = true。
-LLM 收到截断标记可以选择分页读取。
+safeBins: ["git", "ls", "cat"]
+→ 这些命令允许流式 stdin，不需要 allowlist 条目
+→ 但 strictInlineEval 可阻止 "python -c" 等内联形式
+```
+
+### 3. 优雅的后台化
+
+```
+命令执行超过 backgroundMs → 自动转入后台
+→ 返回后台标识给 Agent
+→ 命令完成后 notifyOnExit 通知 Agent
 ```
 
 ---
