@@ -1,232 +1,292 @@
-# Gateway 核心
+# Gateway Core 架构详解
 
-Gateway 是 OpenClaw 的主进程，负责一切：生命周期管理、通道连接、消息路由、Agent 编排。
+Gateway Core 是 OpenClaw 的核心运行时，负责管理所有消息流、Agent 执行和系统资源。
 
-## 🏗️ Gateway 启动流程
+## 🎯 设计目标
 
-```
-homiclaw gateway start
-    │
-    ├── 1. 加载配置 (config.yaml)
-    │     └── 验证 Schema → 合并默认值 → 环境变量覆盖
-    │
-    ├── 2. 初始化状态 (State Store)
-    │     └── 加载会话历史 → 迁移旧格式 → 恢复会话
-    │
-    ├── 3. 启动 RPC Server
-    │     └── 监听 localhost:3272 → CLI 通信端口
-    │
-    ├── 4. 注册内置工具
-    │     └── exec / read / write / web_search / image / cron / ...
-    │
-    ├── 5. 加载 Provider 插件
-    │     └── OpenAI / Anthropic / Google / Ollama / ...
-    │
-    ├── 6. 加载 Channel 插件
-    │     └── Telegram / Discord / WhatsApp / WebChat / ...
-    │
-    ├── 7. 启动 Cron Scheduler
-    │     └── 加载定时任务 → 开始调度
-    │
-    ├── 8. 启动 Control UI (WebChat)
-    │     └── 静态资源 → WebSocket
-    │
-    ├── 9. 启动 Node Service (设备管理)
-    │     └── 配对 → 通知 → 摄像头/屏幕
-    │
-    └── 10. 启动 Heartbeat
-          └── 定期检查 → 主动通知
-```
+- **单一端口**：通过一个端口处理所有 WebSocket 和 HTTP 请求
+- **高并发**：支持数千个并发连接
+- **零停机**：支持配置热重载
+- **安全隔离**：多层安全边界保护
 
-## 🔑 核心数据结构
+## 🔧 核心组件
 
-### Gateway State
+### 1. 网络层 (Port 18789)
 
+#### 多路复用设计
+- **单一端口**：18789 处理所有流量
+- **协议升级**：HTTP → WebSocket 自动升级
+- **路径路由**：
+  - `/` - Control UI
+  - `/ws` - WebSocket API
+  - `/v1/chat/completions` - OpenAI兼容API
+  - `/v1/responses` - OpenResponses API
+
+#### 绑定模式
 ```typescript
-interface GatewayState {
-  // 运行状态
-  status: 'starting' | 'running' | 'stopping' | 'stopped'
-  uptime: number
-  pid: number
+type GatewayBindMode = 
+  | "auto"      // 自动选择（回环优先）
+  | "lan"       // 局域网绑定
+  | "loopback"  // 仅本地
+  | "custom"    // 自定义IP
+  | "tailnet"   // Tailscale网络
+```
 
-  // 通道状态
-  channels: Map<string, ChannelStatus>
+### 2. Lane队列系统
 
-  // 会话索引
-  sessions: Map<string, SessionState>
-
-  // Provider 状态
-  providers: Map<string, ProviderStatus>
-
-  // 工具注册表
-  tools: Map<string, ToolDefinition>
-
-  // Cron 任务
-  cronJobs: CronJob[]
+#### 4条执行Lane
+```typescript
+export const enum CommandLane {
+  Main = "main",      // 主用户交互
+  Cron = "cron",      // 定时任务
+  Subagent = "subagent",  // 子代理
+  Nested = "nested"   // 嵌套调用
 }
 ```
 
-### Session State
+#### Lane调度策略
+- **Main Lane**：用户消息，最高优先级
+- **Cron Lane**：定时任务，后台执行
+- **Subagent Lane**：子代理调用，独立执行
+- **Nested Lane**：嵌套调用，避免继承Cron上下文
 
+#### 队列管理
+- **并发控制**：每条Lane独立并发限制
+- **优先级**：Main > Subagent > Nested > Cron
+- **隔离性**：Lane间完全隔离，避免相互影响
+
+### 3. Agent Runtime
+
+#### Agent循环
 ```typescript
-interface SessionState {
-  key: string              // 会话标识 (channel:user:id)
-  channel: string          // 通道名
-  model: string            // 当前模型
-  history: Message[]       // 消息历史
-  context: ContextWindow   // 上下文窗口
-  toolResults: Map<string, ToolResult>  // 工具调用结果缓存
-  createdAt: number
-  lastActiveAt: number
-  tokenUsage: TokenUsage   // Token 使用统计
-  cost: number             // 费用
+AgentLoop {
+  1. 接收消息
+  2. 构建系统提示
+  3. LLM调用
+  4. 工具调用（如有）
+  5. 响应处理
+  6. 上下文压缩
 }
 ```
 
-## 🔄 消息处理主循环
+#### 上下文管理
+- **Compaction**：动态上下文压缩
+- **Token管理**：基于模型限制的token管理
+- **会话状态**：跨消息的持久化状态
 
+### 4. 会话系统
+
+#### 会话标识
+- **复合键**：`accountId:channel:threadId`
+- **标准化**：统一处理不同通道的ID格式
+- **跨通道**：支持跨通道路由
+
+#### 会话生命周期
+1. **创建**：首次消息创建会话
+2. **激活**：消息处理时激活
+3. **空闲**：超时后进入空闲状态
+4. **清理**：长时间空闲后清理
+
+## 🛡️ 安全架构
+
+### 1. 认证授权
+
+#### 认证模式
 ```typescript
-// 简化的消息处理主循环
-async function handleInboundMessage(message: InboundMessage) {
-  // 1. 标准化消息
-  const normalized = normalizeMessage(message)
+type GatewayAuthMode = 
+  | "none"      // 无认证
+  | "token"     // 令牌认证
+  | "password"  // 密码认证
+  | "trusted-proxy"  // 受信代理
+```
 
-  // 2. 路由到 Session
-  const sessionKey = buildSessionKey(normalized)
-  const session = getOrCreateSession(sessionKey)
-
-  // 3. 入队 Lane Queue（串行化）
-  await laneQueue.enqueue(sessionKey, async () => {
-    // 4. 更新上下文
-    session.context.addUserMessage(normalized)
-
-    // 5. Agent 循环
-    const response = await agentLoop.run(session)
-
-    // 6. 发送回复
-    await outboundHandler.send(response, session.channel)
-  })
+#### 认证配置
+```typescript
+interface GatewayAuthConfig {
+  mode: GatewayAuthMode
+  token?: SecretInput
+  password?: SecretInput
+  allowTailscale?: boolean
+  rateLimit?: {
+    maxAttempts: number
+    windowMs: number
+    lockoutMs: number
+  }
 }
 ```
 
-## 📊 配置系统
+### 2. 工具安全
 
-### 配置层级
+#### 执行边界
+- **沙箱执行**：隔离的工具运行环境
+- **权限控制**：allow/deny列表机制
+- **审批流程**：可配置的审批策略
 
-```
-环境变量 (最高优先级)
-    ↓ 覆盖
-命令行参数
-    ↓ 覆盖
-~/.homiclaw/config.yaml (用户配置)
-    ↓ 合并
-默认值 (最低优先级)
-```
+#### 安全检查
+- **路径限制**：工作目录限制
+- **命令白名单**：只允许预定义命令
+- **超时保护**：防止长时间运行
 
-### 配置 Schema（核心字段）
+### 3. 网络安全
 
-```yaml
-# Gateway
-gateway:
-  port: 3271                # WebChat 端口
-  rpcPort: 3272             # RPC 端口
-
-# Agents
-agents:
-  defaults:
-    model: openai/gpt-4    # 默认模型
-    thinking: off           # 思考模式
-
-# Channels
-channels:
-  telegram:
-    enabled: true
-    botToken: xxx
-  discord:
-    enabled: false
-
-# Providers
-providers:
-  openai:
-    apiKey: sk-xxx
-  anthropic:
-    apiKey: sk-xxx
-
-# Tools
-tools:
-  exec:
-    enabled: true
-    approval: allowlist     # allowlist / full / deny
-  web_search:
-    enabled: true
-
-# Cron
-cron:
-  enabled: true
-  maxJobs: 50
+#### TLS配置
+```typescript
+interface GatewayTlsConfig {
+  enabled: boolean
+  autoGenerate: boolean
+  certPath?: string
+  keyPath?: string
+  caPath?: string
+}
 ```
 
-### 配置热更新
+#### 安全头
+- **HSTS**：HTTP严格传输安全
+- **CORS**：跨域资源共享控制
+- **CSP**：内容安全策略
 
+## 🔄 配置系统
+
+### 1. 配置层级
+
+```typescript
+// 优先级从高到低
+1. 环境变量 (OPENCLAW_*)
+2. 命令行参数
+3. 用户配置文件 (~/.openclaw/config.json5)
+4. 默认值
+```
+
+### 2. 热重载
+
+#### 重载模式
+```typescript
+type GatewayReloadMode = 
+  | "off"      // 禁用重载
+  | "restart"  // 重启进程
+  | "hot"      // 热重载
+  | "hybrid"   // 混合模式
+```
+
+#### 重载流程
+1. **检测变化**：文件系统监控
+2. **验证配置**：类型安全验证
+3. **应用配置**：无中断更新
+4. **回滚机制**：失败时自动回滚
+
+### 3. 配置验证
+
+#### 运行时验证
+- **类型检查**：TypeScript类型验证
+- **值域检查**：配置值范围验证
+- **依赖检查**：配置依赖关系验证
+
+## 📊 监控和指标
+
+### 1. 运行时指标
+
+#### 连接指标
+- **活跃连接数**：当前WebSocket连接数
+- **消息吞吐量**：每秒消息数
+- **响应延迟**：消息处理延迟
+
+#### 系统指标
+- **内存使用**：堆内存使用情况
+- **CPU使用**：CPU使用率
+- **文件描述符**：打开的文件数
+
+### 2. 健康检查
+
+#### HTTP端点
+- **/health** - 基础健康检查
+- **/health/detailed** - 详细健康状态
+- **/metrics** - Prometheus指标
+
+#### 通道健康
+- **连接状态**：通道连接状态
+- **消息队列**：队列长度和延迟
+- **错误率**：通道错误率
+
+## 🚀 部署模式
+
+### 1. 本地部署
 ```bash
-# 运行时修改配置（不打断 Gateway）
-homiclaw config patch agents.defaults.model anthropic/claude-sonnet-4
+# 开发模式
+openclaw gateway --bind loopback
 
-# 查看当前配置
-homiclaw config get agents.defaults.model
+# 生产模式
+openclaw gateway --bind lan --tls
 ```
 
-## 🛡️ 安全边界
-
-Gateway 的安全策略分为多层：
-
-```
-┌──────────────────────────────────────┐
-│           网络边界                    │
-│  Gateway 只监听 localhost            │
-│  不直接暴露到公网                    │
-├──────────────────────────────────────┤
-│           通道边界                    │
-│  Channel Plugin 处理入站消息          │
-│  消息标准化 → 去敏感字段             │
-├──────────────────────────────────────┤
-│           Lane Queue 边界            │
-│  串行化避免并发写入                   │
-│  单 Session 单写                     │
-├──────────────────────────────────────┤
-│           工具执行边界                │
-│  Sandbox 隔离执行                    │
-│  审批机制（allowlist / full / deny） │
-├──────────────────────────────────────┤
-│           Provider 边界              │
-│  API Key 加密存储                    │
-│  请求审计日志                        │
-└──────────────────────────────────────┘
+### 2. 容器部署
+```dockerfile
+FROM node:18-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY . .
+EXPOSE 18789
+CMD ["openclaw", "gateway"]
 ```
 
-## 🐛 常见问题
+### 3. 云部署
 
-### Q: Gateway 崩溃后会自动重启吗？
+#### Cloudflare Workers
+- **无服务器**：自动扩缩容
+- **全球部署**：就近访问
+- **零配置**：自动HTTPS
 
-```
-通过 systemd/launchd 管理 Gateway 时，崩溃后会自动重启。
-homiclaw gateway start --daemon 会注册系统服务。
-```
+#### 自托管
+- **Docker**：容器化部署
+- **Kubernetes**：集群部署
+- **Systemd**：系统服务
 
-### Q: 如何查看 Gateway 占用的端口？
+## 🔧 故障排除
 
+### 1. 常见问题
+
+#### 端口冲突
 ```bash
-lsof -i :3271    # WebChat
-lsof -i :3272    # RPC
+# 检查端口占用
+lsof -i :18789
+
+# 修改端口
+openclaw gateway --port 8080
 ```
 
-### Q: 配置修改后需要重启吗？
+#### 认证失败
+```bash
+# 检查token
+openclaw config get gateway.auth.token
 
+# 重置token
+openclaw config set gateway.auth.token new-token
 ```
-使用 homiclaw config patch 修改的配置会热更新，
-不需要重启 Gateway。只有通道启停需要重启。
+
+### 2. 调试工具
+
+#### 日志级别
+```bash
+# 调试模式
+DEBUG=openclaw:* openclaw gateway
+
+# 详细日志
+openclaw gateway --verbose
 ```
 
----
+#### 性能分析
+```bash
+# CPU分析
+node --prof openclaw gateway
 
-下一篇：[Session 会话系统](./session-system)
+# 内存分析
+node --inspect openclaw gateway
+```
+
+## 📚 相关文档
+
+- [Agent Runtime 架构](./agent-runtime.md)
+- [通道系统设计](./channel-system.md)
+- [配置系统详解](../advanced/configuration.md)
+- [部署指南](../deploy/overview.md)
+- [安全配置](../advanced/security.md)

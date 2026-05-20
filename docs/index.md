@@ -30,7 +30,7 @@ features:
     details: 完整的 Agent 生命周期管理，支持子代理、上下文压缩、流式响应、Cron 定时任务
   - icon: 🏠
     title: 自托管
-    details: 数据本地、代码开源，默认使用 Claude 跑本地 Gateway，你的 AI 助手完全由你掌控
+    details: 数据本地、代码开源，默认使用 openai/gpt-4 跑本地 Gateway，你的 AI 助手完全由你掌控
 ---
 
 ## 📋 内容概览
@@ -74,7 +74,7 @@ Plugin SDK、87 个扩展详解、Provider 插件、Channel 插件、Skill、MCP
 - `src/process/command-queue.ts` — 4 Lane 并发控制
 - `src/cron/types.ts` — Cron 调度与重试机制
 - `src/agents/compaction.ts` — 上下文压缩与分块策略
-- `src/agents/defaults.ts` — 默认模型 claude-opus-4-6、200K 上下文
+- `src/agents/defaults.ts` — 默认模型 openai/gpt-4、200K 上下文
 - `src/config/types.tools.ts` — 完整工具安全策略
 - `src/config/types.sandbox.ts` — Docker/SSH/Browser 沙箱配置
 - `extensions/` — 87 个扩展插件

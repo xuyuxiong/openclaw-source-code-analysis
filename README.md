@@ -1,204 +1,164 @@
 # OpenClaw 源码解析
 
-> OpenClaw 完整源码学习指南 - 从 Gateway 到 Agent Runtime
+深入理解 AI Agent 运行时框架的核心架构，从 Gateway 到 Agent Runtime 的完整技术栈分析。
 
-[![Status](https://img.shields.io/badge/status-complete-brightgreen)](https://github.com/xuyuxiong/openclaw-source-code-analysis)
-[![OpenClaw](https://img.shields.io/badge/OpenClaw-0.2.9-ff6b35)](https://github.com/openclaw/openclaw)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Chapters](https://img.shields.io/badge/chapters-56-orange)]()
+## 🦞 项目概览
 
----
+OpenClaw 是一个开源的 AI Agent 运行时平台，采用纯 TypeScript 实现，无需 Python/Rust 依赖。通过统一的 Gateway 架构，支持 30+ AI Provider 和 18+ 消息通道，提供企业级的 AI 集成解决方案。
 
-## 📖 项目简介
+## 🏗️ 核心架构
 
-本项目是一本完整的 OpenClaw 源码学习指南，共 **56 章**，深入解析 Gateway 架构、Agent Runtime、多通道系统、插件体系等核心模块。
+```
+┌────────────────────────────────────────────────────────────┐
+│                    消息通道 (18+ Channels)                   │
+│  Telegram  Discord  WhatsApp  Signal  Slack  飞书  iMessage  │
+│  IRC  Matrix  MS Teams  Google Chat  LINE  Nostr  Zalo ...  │
+└──────────────────────────┬─────────────────────────────────┘
+                           ↓ 消息标准化 + 出站目标解析
+┌────────────────────────────────────────────────────────────┐
+│                      Gateway Core (18789)                  │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │              Agent Runtime (Agent Loop)               │  │
+│  │  System Prompt → LLM Call → Tool Call → LLM Call... │  │
+│  │  Compaction (动态上下文管理)                         │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                                                            │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐     │
+│  │  Main    │ │  Cron    │ │ Subagent │ │  Nested  │     │
+│  │  Lane    │ │  Lane    │ │  Lane    │ │  Lane    │     │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────┘     │
+└──────────────────────────┬─────────────────────────────────┘
+                           ↓ 动态Provider路由
+┌────────────────────────────────────────────────────────────┐
+│                    Provider 扩展 (30+)                      │
+│  Anthropic  OpenAI  Google  Ollama  DeepSeek  Groq  ...    │
+└────────────────────────────────────────────────────────────┘
+```
 
-相比其他资料，本项目的特点：
-- 🔍 **源码级深度** — 逐层分析核心模块，不仅讲"是什么"，更讲"为什么"
-- 📊 **架构图丰富** — 每章配备数据流图和模块关系图
-- 🦞 **基于最新版本** — 基于 OpenClaw 0.2.9 源码分析
-- 🧪 **实战示例** — 插件开发、配置示例、调试技巧
-- 🐛 **常见问题** — FAQ 解答
+## 🔧 技术特性
 
-👉 **在线阅读**：[https://xuyuxiong.github.io/openclaw-source-code-analysis/](https://xuyuxiong.github.io/openclaw-source-code-analysis/)
+### 🚀 统一架构
+- **单一端口**：18789 处理所有 WebSocket 和 HTTP 请求
+- **多通道统一**：18+ 消息通道统一管理
+- **Provider 抽象**：30+ AI Provider 统一接口
+- **插件优先**：所有功能通过插件动态扩展
 
----
+### �️ 安全设计
+- **多层安全边界**：网络、执行、数据三重隔离
+- **工具沙箱**：Docker/SSH/Browser 三种沙箱模式
+- **权限控制**：细粒度的工具权限管理
+- **审计日志**：完整的操作审计追踪
 
-## ✅ 完成情况
+### ⚡ 高性能
+- **4 Lane 并发**：Main、Cron、Subagent、Nested 独立执行
+- **上下文压缩**：200K 上下文动态压缩
+- **流式响应**：支持 SSE 和 WebSocket 流式传输
+- **智能缓存**：多级缓存策略
 
-| 部分 | 章节数 | 状态 |
-|------|--------|------|
-| 📘 指南篇 | 5/5 | ✅ 已完成 |
-| 📗 理念篇 | 5/5 | ✅ 已完成 |
-| 📙 架构篇 | 8/8 | ✅ 已完成 |
-| 📕 运行时篇 | 8/8 | ✅ 已完成 |
-| 📱 通道篇 | 8/8 | ✅ 已完成 |
-| 🔌 插件篇 | 7/7 | ✅ 已完成 |
-| 💎 进阶篇 | 8/8 | ✅ 已完成 |
-| 🚀 部署篇 | 6/6 | ✅ 已完成 |
-| **总计** | **55/55** | **✅ 全部完成** |
+### � 配置驱动
+- **类型安全**：完整的 TypeScript 类型定义
+- **热重载**：配置变更无需重启
+- **环境管理**：开发、测试、生产环境分离
+- **版本控制**：配置文件可版本化管理
 
----
+## 📁 源码结构
 
-## 📚 内容目录
+```
+src/
+├── gateway/           # Gateway 核心
+│   ├── server.ts      # HTTP/WebSocket 服务器
+│   ├── lanes/         # 4 Lane 队列系统
+│   └── auth/          # 认证授权
+├── agents/            # Agent Runtime
+│   ├── runtime.ts     # Agent 执行引擎
+│   ├── compaction.ts  # 上下文压缩
+│   └── heartbeat.ts   # 心跳管理
+├── channels/          # 消息通道
+│   ├── telegram/      # Telegram 通道
+│   ├── discord/       # Discord 通道
+│   └── ...            # 其他16个通道
+├── providers/         # AI Provider
+│   ├── openai/        # OpenAI Provider
+│   ├── anthropic/     # Anthropic Provider
+│   └── ...            # 其他28个Provider
+├── tools/             # 工具系统
+│   ├── exec/          # 命令执行
+│   ├── fs/            # 文件操作
+│   └── web/           # 网络工具
+└── config/            # 配置系统
+    ├── types.ts       # 类型定义
+    └── validation.ts  # 配置验证
+```
 
-### 📘 指南篇 — 入门准备
-- 学习前提
-- OpenClaw 是什么
-- 快速上手
-- 源码目录结构
-- 调试源码
+## 🎯 快速开始
 
-### 📗 理念篇 — 设计思想
-- 为什么需要 OpenClaw
-- Gateway 模式设计哲学
-- Lane Queue 串行化
-- 插件优先架构
-- 安全与隔离理念
+### 环境要求
+- Node.js 18.0.0+
+- 至少一个 AI Provider API 密钥
 
-### 📙 架构篇 — 整体架构
-- 整体架构
-- Gateway 核心
-- Session 会话系统
-- Lane Queue 命令队列
-- Provider 提供者系统
-- Tool 工具系统
-- Cron 定时任务
-- Node 设备系统
-
-### 📕 运行时篇 — 核心流程
-- Gateway 生命周期
-- 消息处理流程
-- Agent Runtime
-- Streaming 流式响应
-- Compaction 上下文压缩
-- Sub-Agent 子代理
-- Heartbeat 心跳机制
-- 错误处理与重试
-
-### 📱 通道篇 — 消息通道
-- 通道系统总览
-- Channel Plugin 接口
-- Telegram 通道
-- Discord 通道
-- WhatsApp 通道
-- WebChat 通道
-- Signal 通道
-- Slack 通道
-
-### 🔌 插件篇 — 扩展体系
-- 插件系统总览
-- Plugin SDK
-- Provider 插件
-- Channel 插件
-- Skill 技能系统
-- MCP Server 集成
-- 自定义插件开发
-
-### 💎 进阶篇 — 深度主题
-- 安全机制
-- Workspace 工作区
-- 配置系统
-- Sandbox 沙箱执行
-- RPC 通信
-- 状态持久化
-- 性能优化
-- 设计模式
-
-### 🚀 部署篇 — 上线
-- 部署总览
-- 本地部署
-- Docker 部署
-- Cloudflare 部署
-- 自托管 Provider
-- 监控与日志
-
----
-
-## 🚀 快速开始
-
+### 安装
 ```bash
-# 克隆项目
-git clone https://github.com/xuyuxiong/openclaw-source-code-analysis.git
-cd openclaw-source-code-analysis
-
-# 安装依赖
-npm install
-
-# 启动开发服务器
-npm run docs:dev
+npm install -g openclaw
 ```
 
-访问 http://localhost:5173/openclaw-source-code-analysis/
+### 配置
+```bash
+# 初始化配置
+openclaw config init
 
----
-
-## 🛠️ 技术栈
-
-| 项目 | 技术 |
-|------|------|
-| 文档框架 | [VitePress](https://vitepress.dev) |
-| 构建工具 | Vite |
-| 部署 | GitHub Actions + GitHub Pages |
-
----
-
-## 📁 项目结构
-
-```
-openclaw-source-code-analysis/
-├── docs/
-│   ├── .vitepress/          # VitePress 配置
-│   │   └── config.ts        # 侧边栏、导航栏
-│   ├── guide/               # 📘 指南篇 (5 章)
-│   ├── philosophy/          # 📗 理念篇 (5 章)
-│   ├── architecture/        # 📙 架构篇 (8 章)
-│   ├── runtime/             # 📕 运行时篇 (8 章)
-│   ├── channel/             # 📱 通道篇 (8 章)
-│   ├── plugin/              # 🔌 插件篇 (7 章)
-│   ├── advanced/            # 💎 进阶篇 (8 章)
-│   ├── deploy/              # 🚀 部署篇 (6 章)
-│   └── index.md             # 首页
-├── package.json
-└── README.md
+# 设置 API 密钥
+export OPENAI_API_KEY="your-openai-key"
 ```
 
----
+### 启动
+```bash
+# 启动 Gateway
+openclaw gateway
 
-## 🗺️ 学习路线
-
+# 访问控制界面
+open http://localhost:18789
 ```
-指南篇(入门) → 理念篇(设计思想) → 架构篇(整体结构)
-    → 运行时篇(核心流程) → 通道篇(消息通道) → 插件篇(扩展)
-    → 进阶篇(深度) → 部署篇(上线)
-```
 
----
+## 📚 学习路径
 
-## 🎯 适合人群
+### 1. 基础入门
+- [环境准备](docs/guide/prerequisites.md)
+- [快速开始](docs/guide/quick-start.md)
+- [项目结构](docs/guide/structure.md)
 
-- ✅ 对 AI Agent 框架架构感兴趣
-- ✅ 熟悉 TypeScript / Node.js
-- ✅ 想理解 LLM 应用工程化实践
-- ✅ 想为 OpenClaw 贡献代码或开发插件
-- ✅ 想自建 AI 助手平台
+### 2. 架构理解
+- [整体架构](docs/architecture/overview.md)
+- [Gateway 核心](docs/architecture/gateway-core.md)
+- [Agent Runtime](docs/runtime/agent-runtime.md)
+- [会话系统](docs/architecture/session-system.md)
 
----
+### 3. 深度解析
+- [配置系统](docs/advanced/configuration.md)
+- [安全模型](docs/advanced/security.md)
+- [性能优化](docs/advanced/performance.md)
+- [部署方案](docs/deploy/overview.md)
 
-## 🤝 贡献
+### 4. 插件开发
+- [插件系统](docs/plugin/overview.md)
+- [通道插件](docs/plugin/channel-plugin.md)
+- [Provider 插件](docs/plugin/provider-plugin.md)
+- [工具开发](docs/plugin/custom-plugin.md)
 
-欢迎提交 Issue 和 Pull Request！
+## 🔍 源码验证
 
----
+所有文档内容基于真实源码验证，包括：
+- `src/process/command-queue.ts` - 4 Lane 并发控制
+- `src/cron/types.ts` - Cron 调度与重试机制
+- `src/agents/compaction.ts` - 上下文压缩策略
+- `src/config/types.ts` - 完整类型定义
+- `extensions/` - 87 个扩展插件实现
+
+## 🤝 参与贡献
+
+欢迎提交 Issue 和 PR，共同完善这个技术解析项目！
 
 ## 📄 许可证
 
-[MIT License](LICENSE)
+MIT License - 详见 [LICENSE](LICENSE) 文件
 
 ---
-
-## 👋 关于作者
-
-本项目由 [xuyuxiong](https://github.com/xuyuxiong) 创作并维护。
-
-如果你从中受益，欢迎给项目一个 ⭐ Star！

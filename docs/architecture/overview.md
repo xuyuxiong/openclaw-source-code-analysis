@@ -1,154 +1,138 @@
-# 整体架构
+# OpenClaw 架构概览
 
-OpenClaw 的整体架构概览，理解各模块如何协同工作。
+OpenClaw 是一个开源的 AI Agent 运行时平台，设计目标是提供一个统一、可扩展的消息通道和 Agent 管理系统。
 
-## 🏗️ 架构全景
+## 🏗️ 核心架构
+
+OpenClaw 采用四层架构设计：
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│                    消息通道 (18+ Channels)                   │
+│                    消息通道 (30+ Channels)                   │
 │  Telegram  Discord  WhatsApp  Signal  Slack  飞书  iMessage  │
 │  IRC  Matrix  MS Teams  Google Chat  LINE  Nostr  Zalo ...  │
 └──────────────────────────┬─────────────────────────────────┘
-                           ↓ 消息标准化
+                           ↓ 消息标准化 + 出站目标解析
 ┌────────────────────────────────────────────────────────────┐
 │                      Gateway Core                          │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │              Agent Runtime (Agent Loop)               │  │
+│  │  System Prompt → LLM Call → Tool Call → LLM Call... │  │
+│  │  Compaction (动态上下文管理)                         │  │
+│  └──────────────────────────────────────────────────────┘  │
 │                                                            │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐     │
 │  │  Main    │ │  Cron    │ │ Subagent │ │  Nested  │     │
 │  │  Lane    │ │  Lane    │ │  Lane    │ │  Lane    │     │
-│  │ (concurrent=1) │ (concurrent=N) │ (concurrent=1) │     │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────┘     │
-│                                                            │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │              Agent Runtime (Agent Loop)               │  │
-│  │  System Prompt → LLM Call → Tool Call → LLM Call... │  │
-│  │  Compaction (200K ctx, 1.2x safety margin)          │  │
-│  └──────────────────────────────────────────────────────┘  │
-│                                                            │
-│  ┌─────────────┐ ┌─────────────┐ ┌──────────────────┐    │
-│  │ Tool System │ │ Cron System │ │ Session Manager  │    │
-│  │ deny/allow/ │ │ at/every/   │ │ lifecycle +      │    │
-│  │ full + loop │ │ cron +      │ │ persistent store │    │
-│  │ detection   │ │ retry       │ │                  │    │
-│  └─────────────┘ └─────────────┘ └──────────────────┘    │
 └──────────────────────────┬─────────────────────────────────┘
-                           ↓
+                           ↓ 动态Provider路由
 ┌────────────────────────────────────────────────────────────┐
 │                    Provider 扩展 (30+)                      │
 │  Anthropic  OpenAI  Google  Ollama  DeepSeek  Groq  ...    │
-│  OpenRouter  LiteLLM  vLLM  SGLang  Moonshot  Qianfan ...  │
 └────────────────────────────────────────────────────────────┘
 ```
 
-## 📁 源码目录结构
+## 🔧 核心组件
 
+### 1. 消息通道层
+- **统一消息格式**：所有通道消息标准化为统一格式
+- **出站目标解析**：智能路由到正确的通道和用户
+- **通道健康监控**：自动重启不健康的通道连接
+- **配置驱动**：通过配置文件管理30+通道
+
+### 2. Gateway Core
+- **单一端口**：18789端口处理所有WebSocket和HTTP请求
+- **Lane队列系统**：4条独立执行Lane避免阻塞
+- **会话管理**：跨通道的会话状态管理
+- **安全配置**：多层安全边界保护
+
+### 3. Agent Runtime
+- **动态上下文**：Compaction机制管理上下文窗口
+- **工具调用**：安全的工具执行环境
+- **子代理支持**：支持嵌套Agent调用
+- **模型路由**：基于配置的Provider选择
+
+### 4. Provider扩展
+- **动态加载**：运行时加载Provider插件
+- **统一接口**：所有Provider实现相同接口
+- **故障转移**：Provider级别的故障转移
+- **配置驱动**：通过配置管理Provider
+
+## 🔄 数据流
+
+### 消息处理流程
+1. **接收**：通道插件接收原始消息
+2. **标准化**：转换为统一消息格式
+3. **路由**：解析出站目标
+4. **调度**：分配到对应Lane
+5. **处理**：Agent Runtime执行
+6. **响应**：通过通道发送回复
+
+### 配置更新流程
+1. **检测**：配置文件变化
+2. **验证**：类型安全验证
+3. **热重载**：支持restart/hot/hybrid模式
+4. **应用**：无中断更新配置
+
+## 🛡️ 安全模型
+
+### 多层安全边界
+1. **网络边界**：端口绑定、TLS加密
+2. **工具边界**：沙箱执行、权限控制
+3. **会话边界**：会话隔离、跨域保护
+4. **配置边界**：类型安全、运行时验证
+
+### 安全特性
+- **工具沙箱**：隔离的工具执行环境
+- **审批机制**：可配置的工具审批策略
+- **权限控制**：细粒度的权限管理
+- **循环检测**：防止工具调用死循环
+
+## 📊 扩展性
+
+### 水平扩展
+- **多实例部署**：支持多Gateway实例
+- **负载均衡**：基于通道的负载分配
+- **状态共享**：会话状态持久化
+
+### 垂直扩展
+- **Provider扩展**：支持30+ AI Provider
+- **通道扩展**：支持自定义通道插件
+- **工具扩展**：支持自定义工具
+
+## 🔍 监控和运维
+
+### 运行时监控
+- **通道健康**：自动检测和重启
+- **性能指标**：响应时间、吞吐量
+- **错误追踪**：详细的错误日志
+
+### 运维工具
+- **配置验证**：启动前配置检查
+- **健康检查**：HTTP健康检查端点
+- **优雅重启**：支持零停机更新
+
+## 🚀 快速开始
+
+```bash
+# 安装
+npm install -g openclaw
+
+# 初始化配置
+openclaw config init
+
+# 启动服务
+openclaw gateway
+
+# 查看状态
+openclaw status
 ```
-openclaw/
-├── src/                           # 核心源码
-│   ├── gateway/                   # Gateway 核心
-│   │   ├── server-startup.ts      # 启动流程
-│   │   ├── server-lanes.ts        # Lane 并发配置
-│   │   ├── boot.ts                # BOOT.md 执行
-│   │   ├── session-*.ts           # Session 管理
-│   │   ├── exec-approval-*.ts     # 审批管理
-│   │   └── ...
-│   ├── agents/                    # Agent Runtime
-│   │   ├── compaction.ts          # 上下文压缩
-│   │   ├── defaults.ts            # 默认模型 (claude-opus-4-6)
-│   │   ├── provider-stream.ts     # Provider 流式接口
-│   │   ├── auth-profiles.ts       # 认证配置
-│   │   ├── subagent-*.ts          # 子代理管理
-│   │   ├── tools/                 # 内置工具
-│   │   │   ├── bash-tools.ts      # exec 工具
-│   │   │   ├── cron-tool.ts       # Cron 工具
-│   │   │   ├── nodes-tool.ts      # Node 设备工具
-│   │   │   ├── message-tool.ts    # 消息工具
-│   │   │   ├── web-search.ts      # 搜索工具
-│   │   │   ├── web-fetch.ts       # 抓取工具
-│   │   │   ├── image-tool.ts      # 图片工具
-│   │   │   ├── pdf-tool.ts        # PDF 工具
-│   │   │   ├── sessions-spawn-tool.ts  # 子代理工具
-│   │   │   └── ...                # 更多工具
-│   │   └── ...
-│   ├── plugins/                   # 插件系统
-│   │   ├── types.ts               # 插件接口定义
-│   │   ├── registry.ts            # 插件注册表
-│   │   ├── loader.ts              # 插件加载
-│   │   ├── provider-runtime.ts    # Provider 运行时
-│   │   └── ...
-│   ├── channels/                  # 通道系统
-│   │   ├── plugins/               # Channel 插件
-│   │   └── ...
-│   ├── cron/                      # Cron 调度
-│   │   ├── service.ts             # 核心调度
-│   │   ├── schedule.ts            # croner 调度计算
-│   │   ├── types.ts               # 完整类型定义
-│   │   ├── isolated-agent.ts      # 隔离 Agent 运行
-│   │   └── delivery.ts            # 投递逻辑
-│   ├── process/                   # 进程管理
-│   │   ├── lanes.ts               # 4 条 Lane 枚举
-│   │   └── command-queue.ts       # 并发队列实现
-│   ├── config/                    # 配置系统
-│   │   ├── types.ts               # 聚合导出
-│   │   ├── types.tools.ts         # 工具配置类型
-│   │   ├── types.sandbox.ts       # 沙箱配置类型
-│   │   ├── types.cron.ts          # Cron 配置类型
-│   │   ├── types.channels.ts      # 通道配置类型
-│   │   └── config.ts              # 配置加载
-│   ├── security/                  # 安全模块
-│   │   ├── audit.ts               # 审计日志
-│   │   ├── skill-scanner.ts       # Skill 安全扫描
-│   │   └── ...
-│   ├── context-engine/            # 上下文引擎
-│   └── ...
-│
-├── extensions/                    # 87 个扩展
-│   ├── anthropic/                 # Anthropic Claude
-│   ├── openai/                    # OpenAI GPT
-│   ├── google/                    # Google Gemini
-│   ├── ollama/                    # 本地模型
-│   ├── deepseek/                  # DeepSeek
-│   ├── telegram/                  # Telegram 通道
-│   ├── discord/                   # Discord 通道
-│   ├── whatsapp/                  # WhatsApp 通道
-│   ├── brave/                     # Brave 搜索
-│   ├── deepgram/                  # Deepgram 语音
-│   ├── memory-lancedb/            # 向量记忆
-│   └── ...                        # 更多扩展
-│
-├── docs/                          # 官方文档
-└── package.json                   # 包定义 (name: "openclaw")
-```
 
-## 🔑 核心数据流
+## 📚 深入阅读
 
-```
-用户消息 → Channel Plugin → 消息标准化 → Lane Queue → Agent Runtime
-    ↓
-Agent Runtime:
-1. 构建 System Prompt (SOUL.md + USER.md + AGENTS.md + 技能文件)
-2. 拼接上下文 (Conversation History + Workspace Files)
-3. 调用 Provider (Anthropic/OpenAI/Google/...)
-4. 流式接收响应
-5. 如果有 Tool Call → 执行工具 → 回到 2
-6. 纯文本回复 → 出站标准化 → Channel Plugin → 用户
-```
-
-## 📊 关键指标
-
-| 指标 | 数值 |
-|------|------|
-| Provider 扩展 | 30+ |
-| Channel 扩展 | 18+ |
-| 内置工具 | 22 |
-| Lane 数量 | 4 (Main/Cron/Subagent/Nested) |
-| 默认上下文窗口 | 200,000 tokens |
-| 默认模型 | claude-opus-4-6 |
-| Compaction 安全边际 | 1.2x |
-| Cron 重试退避 | 30s → 60s → 300s |
-| Exec 安全策略 | deny / allowlist / full |
-
----
-
-下一篇：[Gateway 核心](./gateway-core)
+- [Gateway Core 详细设计](./gateway-core.md)
+- [Agent Runtime 架构](./agent-runtime.md)
+- [通道系统设计](./channel-system.md)
+- [配置系统详解](../advanced/configuration.md)
+- [部署指南](../deploy/overview.md)
