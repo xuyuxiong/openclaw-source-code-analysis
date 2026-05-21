@@ -366,7 +366,7 @@ openclaw sessions export <session-id> > session.json
 ## 📚 相关文档
 
 - [Gateway Core 架构](./gateway-core.md)
-- [Agent Runtime 架构](./agent-runtime.md)
+- [Agent Runtime 架构](../runtime/agent-runtime.md)
 - [配置系统详解](../advanced/configuration.md)
 - [内存管理](../advanced/state-persistence.md)
 - [安全配置](../advanced/security.md)

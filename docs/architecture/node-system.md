@@ -376,7 +376,7 @@ tcpdump -i any port 8080
 ## 📚 相关文档
 
 - [Gateway Core 架构](./gateway-core.md)
-- [Agent Runtime 架构](./agent-runtime.md)
+- [Agent Runtime 架构](../runtime/agent-runtime.md)
 - [配置系统详解](../advanced/configuration.md)
 - [部署指南](../deploy/overview.md)
 - [监控和日志](../deploy/monitoring.md)

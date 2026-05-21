@@ -5,6 +5,10 @@ export default defineConfig({
   description: 'OpenClaw 完整源码学习指南 - 从 Gateway 到 Agent Runtime',
   base: '/openclaw-source-code-analysis/',
   head: [['link', { rel: 'icon', href: '/openclaw-source-code-analysis/favicon.ico' }]],
+  ignoreDeadLinks: [
+    'http://localhost:18789',
+    /^https?:\/\/localhost/
+  ],
   themeConfig: {
     logo: '/logo.svg',
     nav: [
