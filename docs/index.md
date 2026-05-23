@@ -4,6 +4,11 @@ layout: home
 hero:
   name: OpenClaw源码解析
   tagline: 从 Gateway 到 Agent Runtime，全面掌握 AI Agent 框架核心原理
+  image:
+    src: /logo.svg
+    alt: OpenClaw Logo
+    width: 200
+    height: 200
   actions:
     - theme: brand
       text: 开始学习
